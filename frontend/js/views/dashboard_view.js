@@ -9,7 +9,10 @@ export const dashboardViewTemplate = `
     <div class="hero-card"><span class="t">过磅票</span><div class="n">{{ dash.tickets ?? '—' }}</div></div>
     <div class="hero-card"><span class="t">已放行</span><div class="n">{{ dash.gate_releases ?? '—' }}</div></div>
     <div class="hero-card"><span class="t">已封闸</span><div class="n">{{ dash.gate_seals ?? '—' }}</div></div>
+    <div class="hero-card"><span class="t">超重未清禁放</span><div class="n">{{ dash.release_blocked ?? '—' }}</div></div>
+    <div class="hero-card"><span class="t">可放行</span><div class="n">{{ dash.releasable ?? '—' }}</div></div>
   </div>
-  <p class="hint" style="margin-top:16px">骨架：{{ dash.meta && dash.meta.skeleton }}</p>
+  <p class="hint" style="margin-top:16px">放行口径：超重未清禁放，正式放行册零增；开放超重 {{ dash.open_overloads ?? '—' }} 条与超重未清禁放 {{ dash.release_blocked ?? '—' }} 票同源。</p>
+  <p class="hint">骨架：{{ dash.meta && dash.meta.skeleton }}</p>
 </section>
 `;

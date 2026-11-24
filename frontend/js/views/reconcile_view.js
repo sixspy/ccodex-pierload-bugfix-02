@@ -14,6 +14,18 @@ export const reconcileViewTemplate = `
       <p>申报 {{ reconOne.declared_gross_t }}t · 过磅合计 {{ reconOne.ticket_sum_t }}t</p>
       <p :class="reconOne.balanced ? 'ok' : 'bad'">{{ reconOne.balanced ? '账实平衡' : '偏差待查' }}</p>
       <p>快照数 {{ reconOne.seal_count }} · 可出证明 {{ reconOne.proof_ready ? '是' : '否' }}</p>
+      <p>超重未清禁放 {{ reconOne.release_blocked_count ?? 0 }} 票</p>
+      <table v-if="reconOne.tickets.length" class="data-table">
+        <thead><tr><th>票号</th><th>毛重</th><th>口径</th><th>已放行</th></tr></thead>
+        <tbody>
+          <tr v-for="t in reconOne.tickets" :key="t.ticket_code">
+            <td>{{ t.ticket_code }}</td>
+            <td>{{ fmtT(t.gross_t) }}</td>
+            <td><span class="badge" :class="ticketClass(t.status)">{{ t.status }}</span></td>
+            <td><span class="badge" :class="t.released?'pass':'muted'">{{ t.released ? '是' : '否' }}</span></td>
+          </tr>
+        </tbody>
+      </table>
     </div>
     <ul v-if="reconAllItems.length">
       <li v-for="r in reconAllItems" :key="r.bl_code">{{ r.bl_code }} · {{ r.balanced ? '平' : '偏' }}</li>

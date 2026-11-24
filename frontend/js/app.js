@@ -76,11 +76,17 @@ createApp({
     }
     const api = createApi(() => token.value, () => logout());
 
+    // 可再开超重挂起：已封闸/作废/已放行/超重未清（已有开放挂起）均不可再挂
     const adjudicableTickets = computed(() =>
-      tickets.value.filter((t) => t.status !== "作废" && t.status !== "已封闸")
+      tickets.value.filter(
+        (t) => !["作废", "已封闸", "已放行", "超重未清"].includes(t.status) && !t.release_blocked
+      )
     );
-    const releasableTickets = computed(() =>
-      tickets.value.filter((t) => t.status === "已裁定")
+    // 放行可用：票面口径与超重账均须可放（服务端同一判据）
+    const releasableTickets = computed(() => tickets.value.filter((t) => t.releasable));
+    // 超重未清禁放：同一口径的反面，放行页与超重页共用
+    const gateBlockedTickets = computed(() =>
+      tickets.value.filter((t) => t.release_blocked)
     );
     const sealableTickets = computed(() =>
       tickets.value.filter((t) => ["已裁定","已放行"].includes(t.status))
@@ -92,6 +98,7 @@ createApp({
     }
     function ticketClass(s) {
       if (!s) return "muted";
+      if (s.includes("超重未清")) return "fail";
       if (s.includes("挂起")) return "fail";
       if (s.includes("放行") || s.includes("裁定")) return "pass";
       if (s.includes("封闸")) return "warn";
@@ -266,7 +273,7 @@ createApp({
       reconOne, reconAllItems, proofOne, reconCode, proofCode,
       bridgeForm, laneForm, ticketForm, overloadOpenForm, gateForm, sealForm,
       blForm, lineageForm, customsForm, craneForm,
-      adjudicableTickets, releasableTickets, sealableTickets,
+      adjudicableTickets, releasableTickets, gateBlockedTickets, sealableTickets,
       login, logout, refresh,
       fmtT, ticketClass, shortText,
       createBridge, loadBridgeDetail, createLane, createTicket, loadTicketDetail, selectTicket,

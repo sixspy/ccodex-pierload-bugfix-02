@@ -225,8 +225,11 @@ export const dashboardViewTemplate = `
     <div class="hero-card"><span class="t">过磅票</span><div class="n">{{ dash.tickets ?? '—' }}</div></div>
     <div class="hero-card"><span class="t">已放行</span><div class="n">{{ dash.gate_releases ?? '—' }}</div></div>
     <div class="hero-card"><span class="t">已封闸</span><div class="n">{{ dash.gate_seals ?? '—' }}</div></div>
+    <div class="hero-card"><span class="t">超重未清禁放</span><div class="n">{{ dash.release_blocked ?? '—' }}</div></div>
+    <div class="hero-card"><span class="t">可放行</span><div class="n">{{ dash.releasable ?? '—' }}</div></div>
   </div>
-  <p class="hint" style="margin-top:16px">骨架：{{ dash.meta && dash.meta.skeleton }}</p>
+  <p class="hint" style="margin-top:16px">放行口径：超重未清禁放，正式放行册零增；开放超重 {{ dash.open_overloads ?? '—' }} 条与超重未清禁放 {{ dash.release_blocked ?? '—' }} 票同源。</p>
+  <p class="hint">骨架：{{ dash.meta && dash.meta.skeleton }}</p>
 </section>
 `;"""
 
@@ -271,7 +274,7 @@ TICKETS = r"""
 export const ticketsViewTemplate = `
 <section class="panel">
   <h2>过磅票采集</h2>
-  <p class="hint">录入各轴重 JSON；超重自动旁路挂起并开超重记录。</p>
+  <p class="hint">录入各轴重 JSON；超重自动旁路挂起并开超重记录。票态列为五页统一口径：开放超重未清显示“超重未清”。</p>
   <div class="form-row">
     <div><label>车道</label>
       <select v-model.number="ticketForm.lane_id">
@@ -293,7 +296,7 @@ export const ticketsViewTemplate = `
     <button class="secondary" @click="refresh">刷新</button>
   </div>
   <table class="data-table">
-    <thead><tr><th>票号</th><th>车道</th><th>提单</th><th>毛重</th><th>状态</th><th>代</th><th></th></tr></thead>
+    <thead><tr><th>票号</th><th>车道</th><th>提单</th><th>毛重</th><th>状态</th><th>放行</th><th>代</th><th></th></tr></thead>
     <tbody>
       <tr v-for="t in tickets" :key="t.id" @click="selectTicket(t)">
         <td>{{ t.ticket_code }}</td>
@@ -301,6 +304,7 @@ export const ticketsViewTemplate = `
         <td>{{ t.bl_ref }}</td>
         <td>{{ fmtT(t.gross_t) }}</td>
         <td><span class="badge" :class="ticketClass(t.status)">{{ t.status }}</span></td>
+        <td><span class="badge" :class="t.release_blocked?'fail':(t.releasable?'pass':'muted')">{{ t.release_blocked ? '禁放' : (t.releasable ? '可放' : '—') }}</span></td>
         <td>{{ t.generation }}</td>
         <td><button class="mini-btn" @click.stop="loadTicketDetail(t.id)">详情</button></td>
       </tr>
@@ -316,7 +320,7 @@ OVERLOAD = r"""
 export const overloadViewTemplate = `
 <section class="panel">
   <h2>超重旁路</h2>
-  <p class="hint">开放挂起驶向旁路；闭环后票态回到已裁定方可放行。</p>
+  <p class="hint">开放挂起驶向旁路；闭环后票态回到已裁定方可放行。开放未清即超重未清，放行页同口径禁放。</p>
   <div class="form-row">
     <div><label>过磅票</label>
       <select v-model.number="overloadOpenForm.ticket_id">
@@ -330,7 +334,7 @@ export const overloadViewTemplate = `
     <button class="secondary" @click="refresh">刷新</button>
   </div>
   <table class="data-table">
-    <thead><tr><th>键</th><th>票号</th><th>超重</th><th>阈值</th><th>状态</th><th></th></tr></thead>
+    <thead><tr><th>键</th><th>票号</th><th>超重</th><th>阈值</th><th>挂起态</th><th>放行口径</th><th></th></tr></thead>
     <tbody>
       <tr v-for="h in overloads" :key="h.id">
         <td class="mono">{{ h.hold_key }}</td>
@@ -338,6 +342,7 @@ export const overloadViewTemplate = `
         <td>{{ h.overweight_t }}t</td>
         <td>{{ h.threshold_t }}t</td>
         <td><span class="badge" :class="h.status==='开放'?'fail':'pass'">{{ h.status }}</span></td>
+        <td><span class="badge" :class="h.release_blocked?'fail':'pass'">{{ h.release_blocked ? '超重未清禁放' : '可放行' }}</span></td>
         <td>
           <button v-if="h.status==='开放'" class="mini-btn" @click="closeOverload(h.id)">闭环</button>
         </td>
@@ -351,7 +356,7 @@ GATE = r"""
 export const gateViewTemplate = `
 <section class="panel">
   <h2>闸口放行</h2>
-  <p class="hint">须票态已裁定且无开放超重挂起；旁路未闭环不得抬杆。</p>
+  <p class="hint">须票态已裁定且超重账无开放挂起；超重未清禁放，服务端整笔回滚、正式放行册零增。两人同票放行抢闸口锁，败方只记争用痕。</p>
   <div class="form-row">
     <div><label>过磅票</label>
       <select v-model.number="gateForm.ticket_id">
@@ -363,6 +368,21 @@ export const gateViewTemplate = `
   <div class="actions">
     <button @click="releaseGate">确认放行</button>
     <button class="secondary" @click="refresh">刷新</button>
+  </div>
+  <div v-if="gateBlockedTickets.length" class="detail-box">
+    <p class="hint" style="margin:0 0 8px">禁放（超重未清/旁路未闭环）：闭环超重后方可进放行候选。</p>
+    <table class="data-table">
+      <thead><tr><th>票号</th><th>车道</th><th>票面</th><th>开放超重</th><th>口径</th></tr></thead>
+      <tbody>
+        <tr v-for="t in gateBlockedTickets" :key="t.id">
+          <td>{{ t.ticket_code }}</td>
+          <td>{{ t.lane_code }}</td>
+          <td>{{ t.stored_status }}</td>
+          <td>{{ t.open_holds }} 条开放</td>
+          <td><span class="badge fail">{{ t.status }}</span></td>
+        </tr>
+      </tbody>
+    </table>
   </div>
   <table class="data-table">
     <thead><tr><th>放行号</th><th>票号</th><th>车道</th><th>值班员</th><th>时间</th></tr></thead>
@@ -496,6 +516,18 @@ export const reconcileViewTemplate = `
       <p>申报 {{ reconOne.declared_gross_t }}t · 过磅合计 {{ reconOne.ticket_sum_t }}t</p>
       <p :class="reconOne.balanced ? 'ok' : 'bad'">{{ reconOne.balanced ? '账实平衡' : '偏差待查' }}</p>
       <p>快照数 {{ reconOne.seal_count }} · 可出证明 {{ reconOne.proof_ready ? '是' : '否' }}</p>
+      <p>超重未清禁放 {{ reconOne.release_blocked_count ?? 0 }} 票</p>
+      <table v-if="reconOne.tickets.length" class="data-table">
+        <thead><tr><th>票号</th><th>毛重</th><th>口径</th><th>已放行</th></tr></thead>
+        <tbody>
+          <tr v-for="t in reconOne.tickets" :key="t.ticket_code">
+            <td>{{ t.ticket_code }}</td>
+            <td>{{ fmtT(t.gross_t) }}</td>
+            <td><span class="badge" :class="ticketClass(t.status)">{{ t.status }}</span></td>
+            <td><span class="badge" :class="t.released?'pass':'muted'">{{ t.released ? '是' : '否' }}</span></td>
+          </tr>
+        </tbody>
+      </table>
     </div>
     <ul v-if="reconAllItems.length">
       <li v-for="r in reconAllItems" :key="r.bl_code">{{ r.bl_code }} · {{ r.balanced ? '平' : '偏' }}</li>
@@ -674,11 +706,17 @@ createApp({
     }
     const api = createApi(() => token.value, () => logout());
 
+    // 可再开超重挂起：已封闸/作废/已放行/超重未清（已有开放挂起）均不可再挂
     const adjudicableTickets = computed(() =>
-      tickets.value.filter((t) => t.status !== "作废" && t.status !== "已封闸")
+      tickets.value.filter(
+        (t) => !["作废", "已封闸", "已放行", "超重未清"].includes(t.status) && !t.release_blocked
+      )
     );
-    const releasableTickets = computed(() =>
-      tickets.value.filter((t) => t.status === "已裁定")
+    // 放行可用：票面口径与超重账均须可放（服务端同一判据）
+    const releasableTickets = computed(() => tickets.value.filter((t) => t.releasable));
+    // 超重未清禁放：同一口径的反面，放行页与超重页共用
+    const gateBlockedTickets = computed(() =>
+      tickets.value.filter((t) => t.release_blocked)
     );
     const sealableTickets = computed(() =>
       tickets.value.filter((t) => ["已裁定","已放行"].includes(t.status))
@@ -690,6 +728,7 @@ createApp({
     }
     function ticketClass(s) {
       if (!s) return "muted";
+      if (s.includes("超重未清")) return "fail";
       if (s.includes("挂起")) return "fail";
       if (s.includes("放行") || s.includes("裁定")) return "pass";
       if (s.includes("封闸")) return "warn";
@@ -870,7 +909,7 @@ createApp({
       reconOne, reconAllItems, proofOne, reconCode, proofCode,
       bridgeForm, laneForm, ticketForm, overloadOpenForm, gateForm, sealForm,
       blForm, lineageForm, customsForm, craneForm,
-      adjudicableTickets, releasableTickets, sealableTickets,
+      adjudicableTickets, releasableTickets, gateBlockedTickets, sealableTickets,
       login, logout, refresh, viewMap,
       fmtT, ticketClass, shortText,
       createBridge, loadBridgeDetail, createLane, createTicket, loadTicketDetail, selectTicket,

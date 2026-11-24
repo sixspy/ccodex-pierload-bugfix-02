@@ -7,7 +7,11 @@ from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
 from locks import release, require_lock
 from models import GateReleaseIn
-from validators import validate_no_open_overload, validate_ticket_mutable
+from validators import (
+    open_overload_holds,
+    validate_no_open_overload,
+    validate_ticket_mutable,
+)
 
 router = APIRouter(tags=["gate"])
 
@@ -29,10 +33,15 @@ def list_releases(authorization: AuthHeader = None):
 @router.post("/api/gate/release")
 def release_gate(body: GateReleaseIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
-    lock_key = f"gate:{body.ticket_id}"
+    gate_key = f"gate:{body.ticket_id}"
+    # 闸口锁管两人同票放行；票锁管放行与超重开挂/闭环的先后，防止两账交叉
+    lock_keys = (gate_key, f"ticket:{body.ticket_id}")
+    acquired: list[str] = []
     with connect() as conn:
-        require_lock(conn, lock_key, user)
         try:
+            for key in lock_keys:
+                require_lock(conn, key, user)
+                acquired.append(key)
             ticket = conn.execute(
                 """SELECT t.*, l.id lane_id FROM weigh_tickets t
                    JOIN weigh_lanes l ON l.id=t.lane_id WHERE t.id=?""",
@@ -45,8 +54,8 @@ def release_gate(body: GateReleaseIn, authorization: AuthHeader = None):
                 raise HTTPException(409, "票态不允许放行")
             if ticket["status"] == "旁路挂起":
                 raise HTTPException(409, "旁路挂起须先闭环")
-            # BUGFIX-02 埋雷：跳过开放超重检查，仍可正式放行
-            # validate_no_open_overload(conn, body.ticket_id)
+            # 超重未清禁放：以超重账开放挂起为准，不看票态单边
+            validate_no_open_overload(conn, body.ticket_id)
             exists = conn.execute(
                 "SELECT id FROM gate_releases WHERE ticket_id=? AND status='已放行'",
                 (body.ticket_id,),
@@ -78,6 +87,11 @@ def release_gate(body: GateReleaseIn, authorization: AuthHeader = None):
                 ref,
                 {"release_id": cur.lastrowid, "ticket_id": body.ticket_id},
             )
+            # 放行校验与写入须同一账页：超重未清整笔回滚，正式册零增
+            still_open = open_overload_holds(conn, body.ticket_id)
+            if still_open:
+                conn.rollback()
+                raise HTTPException(409, "超重未清禁放：放行整笔回滚")
             conn.commit()
             return {
                 "id": cur.lastrowid,
@@ -85,4 +99,5 @@ def release_gate(body: GateReleaseIn, authorization: AuthHeader = None):
                 "status": "已放行",
             }
         finally:
-            release(conn, lock_key, user)
+            for key in reversed(acquired):
+                release(conn, key, user)

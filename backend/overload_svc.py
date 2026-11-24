@@ -15,8 +15,11 @@ router = APIRouter(tags=["overload"])
 @router.get("/api/overloads")
 def list_overloads(authorization: AuthHeader = None, status: str | None = None):
     require_user(authorization)
+    from db import ticket_status_view
+
     with connect() as conn:
-        q = """SELECT h.*, t.ticket_code, t.vehicle_plate, t.gross_t
+        q = """SELECT h.*, t.ticket_code, t.vehicle_plate, t.gross_t,
+                      t.status ticket_stored_status
                FROM overload_holds h JOIN weigh_tickets t ON t.id=h.ticket_id"""
         if status:
             rows = conn.execute(
@@ -24,7 +27,16 @@ def list_overloads(authorization: AuthHeader = None, status: str | None = None):
             ).fetchall()
         else:
             rows = conn.execute(q + " ORDER BY h.id DESC").fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = dict(r)
+            view = ticket_status_view(
+                conn, int(d["ticket_id"]), d["ticket_stored_status"]
+            )
+            d["ticket_status"] = view["effective_status"]
+            d["release_blocked"] = view["release_blocked"]
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/overloads/open")
@@ -42,6 +54,13 @@ def open_overload(body: OverloadOpenIn, authorization: AuthHeader = None):
             if not ticket:
                 raise HTTPException(404, "过磅票不存在")
             validate_ticket_mutable(dict(ticket))
+            released = conn.execute(
+                """SELECT id FROM gate_releases
+                   WHERE ticket_id=? AND status='已放行'""",
+                (body.ticket_id,),
+            ).fetchone()
+            if released:
+                raise HTTPException(409, "票已正式放行，不得再挂超重")
             open_one = conn.execute(
                 """SELECT id FROM overload_holds WHERE ticket_id=? AND status='开放'""",
                 (body.ticket_id,),
@@ -100,11 +119,15 @@ def close_overload(body: OverloadCloseIn, authorization: AuthHeader = None):
         ).fetchone()
         if not hold:
             raise HTTPException(404, "挂起不存在")
-        if hold["status"] != "开放":
-            raise HTTPException(409, "挂起已关闭")
         lock_key = f"ticket:{hold['ticket_id']}"
         require_lock(conn, lock_key, user)
         try:
+            # 抢锁后重读：状态判定必须在锁内，防止双路并发重复闭环
+            hold = conn.execute(
+                "SELECT * FROM overload_holds WHERE id=?", (body.hold_id,)
+            ).fetchone()
+            if not hold or hold["status"] != "开放":
+                raise HTTPException(409, "挂起已关闭")
             now = now_iso()
             conn.execute(
                 """UPDATE overload_holds SET status='已关闭', closed_at=?, side_lane_note=?
@@ -116,7 +139,12 @@ def close_overload(body: OverloadCloseIn, authorization: AuthHeader = None):
                    WHERE ticket_id=? AND status='开放'""",
                 (hold["ticket_id"],),
             ).fetchone()["c"]
-            if not open_left:
+            released = conn.execute(
+                """SELECT id FROM gate_releases
+                   WHERE ticket_id=? AND status='已放行'""",
+                (hold["ticket_id"],),
+            ).fetchone()
+            if not open_left and not released:
                 conn.execute(
                     """UPDATE weigh_tickets SET status='已裁定', adjudicated_at=?
                        WHERE id=?""",

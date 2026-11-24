@@ -17,34 +17,55 @@ class LockIn(BaseModel):
 
 def try_acquire(conn, lock_key: str, holder: str) -> bool:
     now = now_iso()
+    # 先读再抢：持有者已存在时立即判争用并落痕，不写业务
     row = conn.execute(
         "SELECT holder FROM pier_locks WHERE lock_key=?", (lock_key,)
     ).fetchone()
-    if row is None:
+    if row is not None:
+        if row["holder"] == holder:
+            return True
         conn.execute(
-            "INSERT INTO pier_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
-            (lock_key, holder, now),
+            """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
+               VALUES (?,?,?,?,?)""",
+            (lock_key, holder, "争用", f"持有者={row['holder']}", now),
         )
+        return False
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO pier_locks(lock_key,holder,acquired_at)
+           VALUES (?,?,?)""",
+        (lock_key, holder, now),
+    )
+    if cur.rowcount == 1:
         return True
-    if row["holder"] == holder:
+    row = conn.execute(
+        "SELECT holder FROM pier_locks WHERE lock_key=?", (lock_key,)
+    ).fetchone()
+    if row is not None and row["holder"] == holder:
         return True
+    held_by = row["holder"] if row else "未知"
     conn.execute(
         """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
            VALUES (?,?,?,?,?)""",
-        (lock_key, holder, "争用", f"持有者={row['holder']}", now),
+        (lock_key, holder, "争用", f"持有者={held_by}", now),
     )
     return False
 
 
 def release(conn, lock_key: str, holder: str) -> None:
+    # 先丢弃本笔未提交的业务写入（失败路径要求整笔回滚），再释放锁并落库
+    conn.rollback()
     conn.execute(
         "DELETE FROM pier_locks WHERE lock_key=? AND holder=?",
         (lock_key, holder),
     )
+    conn.commit()
 
 
 def require_lock(conn, lock_key: str, holder: str) -> None:
-    if not try_acquire(conn, lock_key, holder):
+    ok = try_acquire(conn, lock_key, holder)
+    # 抢锁与争用痕须独立落库：对手才能看见锁，败方争用不能随业务异常回滚
+    conn.commit()
+    if not ok:
         raise HTTPException(409, "争用：后到只记争用，不写业务")
 
 

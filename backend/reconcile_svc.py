@@ -39,15 +39,17 @@ def reconcile_one(bl_code: str, authorization: AuthHeader = None):
 
 
 def _reconcile_bl(conn, bl_code: str) -> dict:
+    from db import ticket_release_flags, effective_ticket_status
+
     bl = conn.execute(
         "SELECT * FROM bl_manifests WHERE bl_code=?", (bl_code,)
     ).fetchone()
-    tickets = conn.execute(
-        """SELECT ticket_code, gross_t, status, generation FROM weigh_tickets
+    ticket_rows = conn.execute(
+        """SELECT id, ticket_code, gross_t, status, generation FROM weigh_tickets
            WHERE bl_ref=? AND status NOT IN ('作废')""",
         (bl_code,),
     ).fetchall()
-    if not tickets:
+    if not ticket_rows:
         return {
             "bl_code": bl_code,
             "declared_gross_t": bl["declared_gross_t"],
@@ -56,7 +58,7 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
             "reason": "无过磅票",
             "tickets": [],
         }
-    ticket_sum = round(sum(float(t["gross_t"]) for t in tickets), 3)
+    ticket_sum = round(sum(float(t["gross_t"]) for t in ticket_rows), 3)
     declared = float(bl["declared_gross_t"])
     matched = validate_bl_match(declared, ticket_sum, tolerance=0.1)
     seal_rows = conn.execute(
@@ -66,6 +68,29 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
         (bl_code,),
     ).fetchall()
     proof_ok = matched and len(seal_rows) >= 1
+    tickets = []
+    blocked = 0
+    for t in ticket_rows:
+        flags = ticket_release_flags(conn, int(t["id"]))
+        status = effective_ticket_status(
+            t["status"], flags["open_holds"], flags["released"]
+        )
+        if flags["open_holds"] and not flags["released"]:
+            blocked += 1
+        tickets.append(
+            {
+                "ticket_code": t["ticket_code"],
+                "gross_t": t["gross_t"],
+                "status": status,
+                "stored_status": t["status"],
+                "generation": t["generation"],
+                "open_holds": flags["open_holds"],
+                "released": flags["released"],
+                "release_blocked": bool(
+                    flags["open_holds"] and not flags["released"]
+                ),
+            }
+        )
     return {
         "bl_code": bl_code,
         "declared_gross_t": declared,
@@ -73,7 +98,8 @@ def _reconcile_bl(conn, bl_code: str) -> dict:
         "balanced": matched,
         "proof_ready": proof_ok,
         "seal_count": len(seal_rows),
-        "tickets": [dict(t) for t in tickets],
+        "release_blocked_count": blocked,
+        "tickets": tickets,
         "seals": [dict(s) for s in seal_rows],
     }
 

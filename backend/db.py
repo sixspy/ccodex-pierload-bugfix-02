@@ -451,6 +451,58 @@ def init_db() -> None:
         conn.commit()
 
 
+def ticket_release_flags(conn: sqlite3.Connection, ticket_id: int) -> dict:
+    """放行口径共用状态：开放超重与正式放行册两本账各查一次。"""
+    open_holds = conn.execute(
+        """SELECT COUNT(*) c FROM overload_holds
+           WHERE ticket_id=? AND status='开放'""",
+        (ticket_id,),
+    ).fetchone()["c"]
+    released = conn.execute(
+        """SELECT 1 FROM gate_releases WHERE ticket_id=? AND status='已放行'""",
+        (ticket_id,),
+    ).fetchone()
+    return {"open_holds": int(open_holds), "released": released is not None}
+
+
+def effective_ticket_status(
+    stored_status: str, open_holds: int, released: bool
+) -> str:
+    """五页同态口径：正式放行优先，其次超重未清，再回票面存量状态。
+
+    正常旁路挂起（票态与超重账一致）不改写；只有票面显示可放行却仍挂开放超重的
+    混用态，统一暴露为“超重未清”，避免放行/过磅/超重/对账/总览各页各说各话。
+    """
+    if released:
+        return "已放行"
+    if open_holds and stored_status != "旁路挂起":
+        return "超重未清"
+    return stored_status
+
+
+def ticket_status_view(
+    conn: sqlite3.Connection, ticket_id: int, stored_status: str
+) -> dict:
+    flags = ticket_release_flags(conn, ticket_id)
+    effective = effective_ticket_status(
+        stored_status, flags["open_holds"], flags["released"]
+    )
+    return {
+        "stored_status": stored_status,
+        "effective_status": effective,
+        "open_holds": flags["open_holds"],
+        "released": flags["released"],
+        # 现在是否被超重账拦住放行：已正式放行的不再算“禁放”
+        "release_blocked": bool(flags["open_holds"] and not flags["released"]),
+        # 真正可抬杆：票态已裁定、超重账无开放挂起、且尚未正式放行
+        "releasable": bool(
+            stored_status == "已裁定"
+            and not flags["open_holds"]
+            and not flags["released"]
+        ),
+    }
+
+
 def dashboard_stats(conn: sqlite3.Connection) -> dict:
     bridges = conn.execute("SELECT COUNT(*) c FROM weigh_bridges").fetchone()["c"]
     lanes = conn.execute("SELECT COUNT(*) c FROM weigh_lanes").fetchone()["c"]
@@ -477,6 +529,29 @@ def dashboard_stats(conn: sqlite3.Connection) -> dict:
         """SELECT COUNT(*) c FROM weigh_tickets
            WHERE status='旁路挂起'"""
     ).fetchone()["c"]
+    release_blocked = conn.execute(
+        """SELECT COUNT(*) c FROM weigh_tickets t
+           WHERE EXISTS (
+               SELECT 1 FROM overload_holds h
+               WHERE h.ticket_id=t.id AND h.status='开放'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM gate_releases g
+               WHERE g.ticket_id=t.id AND g.status='已放行'
+           )"""
+    ).fetchone()["c"]
+    releasable = conn.execute(
+        """SELECT COUNT(*) c FROM weigh_tickets t
+           WHERE t.status='已裁定'
+           AND NOT EXISTS (
+               SELECT 1 FROM overload_holds h
+               WHERE h.ticket_id=t.id AND h.status='开放'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM gate_releases g
+               WHERE g.ticket_id=t.id AND g.status='已放行'
+           )"""
+    ).fetchone()["c"]
     return {
         "bridges": bridges,
         "lanes": lanes,
@@ -486,6 +561,8 @@ def dashboard_stats(conn: sqlite3.Connection) -> dict:
         "gate_seals": sealed,
         "bl_manifests": bl_count,
         "side_pending": pending,
+        "release_blocked": release_blocked,
+        "releasable": releasable,
         "stubs": stubs,
         "meta": PRODUCT_META,
     }

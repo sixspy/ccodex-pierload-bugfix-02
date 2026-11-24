@@ -59,9 +59,22 @@ def validate_ticket_sealable(ticket: dict) -> None:
         raise HTTPException(409, "票态已锁定")
 
 
+def open_overload_holds(conn, ticket_id: int) -> list[dict]:
+    rows = conn.execute(
+        """SELECT id, hold_key, overweight_t, threshold_t, opened_at
+           FROM overload_holds WHERE ticket_id=? AND status='开放'
+           ORDER BY id""",
+        (ticket_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def validate_no_open_overload(conn, ticket_id: int) -> None:
-    # BUGFIX-02 埋雷：校验空跑，永不拦
-    return
+    """超重未清禁放：存在开放挂起则整笔拒绝。"""
+    holds = open_overload_holds(conn, ticket_id)
+    if holds:
+        keys = "、".join(h["hold_key"] for h in holds)
+        raise HTTPException(409, f"超重未清禁放（开放挂起：{keys}）")
 
 
 def format_manifest(ticket: dict, gross: float, generation: int) -> str:

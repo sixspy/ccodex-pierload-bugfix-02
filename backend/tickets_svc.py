@@ -34,22 +34,24 @@ def _next_ticket_code(conn, lane_id: int) -> str:
 @router.get("/api/tickets")
 def list_tickets(authorization: AuthHeader = None, status: str | None = None):
     require_user(authorization)
+    from db import ticket_status_view
+
     with connect() as conn:
         q = """SELECT t.*, l.lane_code, b.bridge_code FROM weigh_tickets t
                JOIN weigh_lanes l ON l.id=t.lane_id
                JOIN weigh_bridges b ON b.id=l.bridge_id"""
-        if status:
-            rows = conn.execute(
-                q + " WHERE t.status=? ORDER BY t.id DESC", (status,)
-            ).fetchall()
-        else:
-            rows = conn.execute(q + " ORDER BY t.id DESC").fetchall()
+        rows = conn.execute(q + " ORDER BY t.id DESC").fetchall()
         items = []
         for r in rows:
             d = dict(r)
             d["axle_weights"] = json.loads(d["axle_weights"] or "[]")
+            view = ticket_status_view(conn, int(d["id"]), d["status"])
+            d.update(view)
+            d["status"] = view["effective_status"]
             items.append(d)
-        return {"items": items}
+    if status:
+        items = [x for x in items if x["status"] == status]
+    return {"items": items}
 
 
 @router.get("/api/tickets/{ticket_id}")
@@ -68,6 +70,11 @@ def get_ticket(ticket_id: int, authorization: AuthHeader = None):
             raise HTTPException(404, "过磅票不存在")
         data = dict(row)
         data["axle_weights"] = json.loads(data["axle_weights"] or "[]")
+        from db import ticket_status_view
+
+        view = ticket_status_view(conn, ticket_id, data["status"])
+        data.update(view)
+        data["status"] = view["effective_status"]
         holds = conn.execute(
             "SELECT * FROM overload_holds WHERE ticket_id=? ORDER BY id DESC",
             (ticket_id,),
